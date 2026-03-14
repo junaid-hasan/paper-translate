@@ -1,6 +1,7 @@
 import cors from 'cors';
 import express from 'express';
 import { readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import { loadFixtureTranslation } from './fixtures.js';
@@ -15,6 +16,9 @@ app.use(express.json({ limit: '15mb' }));
 const DEFAULT_MODEL = (process.env.OLLAMA_MODEL ?? 'qwen3.5:2b') as NonNullable<TranslatePageRequest['model']>;
 const OLLAMA_URL = process.env.OLLAMA_URL ?? 'http://127.0.0.1:11434/api/chat';
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
+const MAX_REQUESTS_PER_WINDOW = Number(process.env.RATE_LIMIT_MAX ?? 20);
+const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS ?? 60_000);
+const requestCounts = new Map<string, { count: number; windowStartedAt: number }>();
 
 const requestSchema = z.object({
   documentId: z.string().min(1),
@@ -28,6 +32,11 @@ const requestSchema = z.object({
 });
 
 async function readProviderKey(provider: string): Promise<string> {
+  const envKey = provider === 'openrouter' ? process.env.OPENROUTER_API_KEY : undefined;
+  if (envKey?.trim()) {
+    return envKey.trim();
+  }
+
   const apiFilePath = path.join(process.cwd(), 'api.txt');
   const contents = await readFile(apiFilePath, 'utf8');
   const pattern = new RegExp(`"${provider}"\\s*=\\s*"([^"]+)"`);
@@ -36,6 +45,37 @@ async function readProviderKey(provider: string): Promise<string> {
     throw new Error(`Missing API key for provider '${provider}' in api.txt`);
   }
   return match[1];
+}
+
+function getClientKey(request: express.Request): string {
+  const forwardedFor = request.headers['x-forwarded-for'];
+  if (typeof forwardedFor === 'string' && forwardedFor.length > 0) {
+    return forwardedFor.split(',')[0]?.trim() ?? request.ip;
+  }
+
+  return request.ip ?? 'unknown';
+}
+
+function enforceRateLimit(request: express.Request, response: express.Response): boolean {
+  const key = getClientKey(request);
+  const now = Date.now();
+  const current = requestCounts.get(key);
+
+  if (!current || now - current.windowStartedAt >= RATE_LIMIT_WINDOW_MS) {
+    requestCounts.set(key, { count: 1, windowStartedAt: now });
+    return true;
+  }
+
+  if (current.count >= MAX_REQUESTS_PER_WINDOW) {
+    response.status(429).json({
+      error: `Rate limit exceeded. Try again in ${Math.ceil((RATE_LIMIT_WINDOW_MS - (now - current.windowStartedAt)) / 1000)}s.`
+    });
+    return false;
+  }
+
+  current.count += 1;
+  requestCounts.set(key, current);
+  return true;
 }
 
 function supportsImages(model: string | undefined): boolean {
@@ -221,6 +261,10 @@ app.get('/api/health', (_req, res) => {
 });
 
 app.post('/api/translate-page', async (req, res) => {
+  if (!enforceRateLimit(req, res)) {
+    return;
+  }
+
   const parsedRequest = requestSchema.safeParse(req.body);
 
   if (!parsedRequest.success) {
@@ -263,6 +307,20 @@ app.post('/api/translate-page', async (req, res) => {
     res.status(500).json({ error: message });
   }
 });
+
+const distPath = path.join(process.cwd(), 'dist');
+if (existsSync(distPath)) {
+  app.use(express.static(distPath));
+
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api/')) {
+      next();
+      return;
+    }
+
+    res.sendFile(path.join(distPath, 'index.html'));
+  });
+}
 
 const port = Number(process.env.PORT ?? 8787);
 app.listen(port, () => {

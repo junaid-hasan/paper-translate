@@ -1,4 +1,4 @@
-# Rosetta Paper V0 Plan
+# Paper Translate V0 Plan
 
 ## Product goal
 

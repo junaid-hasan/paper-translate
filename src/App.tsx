@@ -224,6 +224,15 @@ function detectLanguageVerdict(text: string): LanguageVerdict {
   return ranked[0].label;
 }
 
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  const tagName = target.tagName;
+  return tagName === 'INPUT' || tagName === 'TEXTAREA' || target.isContentEditable;
+}
+
 function MathHtml({ html, className }: { html: string; className?: string }) {
   const ref = useRef<HTMLDivElement | null>(null);
 
@@ -440,6 +449,10 @@ export function App() {
 
   useEffect(() => {
     const onKeyDown = async (event: KeyboardEvent) => {
+      if (isTypingTarget(event.target)) {
+        return;
+      }
+
       if (event.key === 'Escape') {
         setViewMode('single');
         setTranslationState('idle');
@@ -536,7 +549,7 @@ export function App() {
     <div className="app-shell">
       <header className="topbar">
         <div>
-          <h1>Rosetta Paper</h1>
+          <h1>Paper Translate</h1>
           <p>{SAMPLE_MESSAGE}</p>
           <p className="debug-inline">
             Mode: {useFixture ? 'fixture' : 'real'} | Asset: {selectedAssetKind} | State: {translationState} | Model: {selectedModel}
